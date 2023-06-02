@@ -1,0 +1,558 @@
+---
+title: "Quant STM"
+output: html_notebook
+---
+
+```{r}
+library(here)
+library(DBI)
+library(RSQLite)
+library(raster)
+library(sf)
+library(httr) # generic webservice package
+library(tmap)
+```
+
+```{r}
+#test
+# mean function
+mean_na <- function(x){
+  x_mean <- mean(x, na.rm=TRUE)
+  return(x_mean)
+}
+
+# connect
+db <- dbConnect(RSQLite::SQLite(), 'C:/R_Drive/Data_Files/LPKS_Data/Data/Soil_Pedon_Databases/NRCS/KSSL/LabDataMart_4-17-23/ncss_labdata.sqlite')
+
+dbListTables(db)
+
+# list fields
+# dbListFields(db, 'lab_pedon')
+# dbListFields(db, 'lab_site')
+# dbListFields(db, 'lab_physical_properties')
+# dbListFields(db, 'lab_chemical_properties')
+# dbListFields(db, 'lab_combine_nasis_ncss')
+lab_layer <- dbGetQuery(db, "SELECT * from lab_layer;")
+lab_site <- dbGetQuery(db, "SELECT * from lab_site;")
+lab_pedon <- dbGetQuery(db, "SELECT * from lab_pedon;")
+lab_phy <- dbGetQuery(db, "SELECT * from lab_physical_properties;")
+lab_chem <- dbGetQuery(db, "SELECT * from lab_chemical_properties;")
+lab_nasis <- dbGetQuery(db, "SELECT * from lab_combine_nasis_ncss;")
+
+# series included in the Loamy Tableland ESD
+Loamy_tableland <- c('Ulysses', 'Richfield', 'Keith', 'Kuma', 'Rosebud', 'Blackwood', 'Dawes', 'Mace', 'McConaughy', 'Norka', 'Satanta', 'Weld')
+
+Loamy_tableland_nasis <- lab_nasis |> dplyr::filter(SSL_name %in% Loamy_tableland) |> dplyr::select(pedon_key, pedlabsampnum, peiid, samp_name,corr_name, SSL_name, lat=latitude_decimal_degrees, lon=longitude_decimal_degrees) 
+
+
+phy_layer <- lab_phy |> dplyr::select(layer_key, texture_lab, clay_total, silt_total, sand_total, bulk_density_third_bar, aggregate_stability_05_2_mm, water_retention_third_bar, water_retention_15_bar, water_retention_field_state) |> dplyr::left_join(lab_layer |> dplyr::select(layer_key, labsampnum, hzn_top, hzn_bot, hzn_desgn, hzn_master, pedon_key, site_key), by="layer_key")
+
+phy_chem_layer <- phy_layer |> dplyr::left_join(lab_chem |> dplyr::select(layer_key, ph_h2o,total_carbon_ncs, total_nitrogen_ncs, organic_carbon_walkley_black,estimated_organic_carbon, carbon_to_nitrogen_ratio), by="layer_key")
+
+
+LT_phy_chem <- Loamy_tableland_nasis |> dplyr::left_join(phy_chem_layer , by=c("pedon_key")) |> dplyr::filter(!is.na(lat))
+
+```
+
+```{r}
+#NASIS tables
+# pedon  to siteobs: siteobsiidref==siteobsiid
+
+pedon <- data.table::fread("C:/R_Drive/Data_Files/LPKS_Data/Data/Soil_Pedon_Databases/NRCS/NASIS/NASIS_APRIL_2017/CSV_files/pedon.csv",
+    sep = "|", header = T)
+
+siteobs <- data.table::fread("C:/R_Drive/Data_Files/LPKS_Data/Data/Soil_Pedon_Databases/NRCS/NASIS/NASIS_APRIL_2017/CSV_files/siteobs.csv",
+    sep = "|", header = T)
+
+
+nasis_pedon <- pedon |> dplyr::select(peiid, siteobsiidref, earthcovkind1, earthcovkind2, pedlabsampnum) |> dplyr::left_join(siteobs |> dplyr::select(siteobsiid, obsdate), by=c('siteobsiidref'='siteobsiid'))
+
+
+#join to LT_phy_chem
+
+LT_phy_chem_nasis <- LT_phy_chem |> dplyr::left_join(nasis_pedon, by="peiid") |> dplyr::distinct()
+```
+
+
+```{r}
+LT_data_points <- st_as_sf(LT_phy_chem, coords = c("lon","lat"), crs = 4326)
+
+# State/MLRA Boundary
+
+#wfs_mlra <- 'https://services.arcgis.com/SXbDpmb7xQkk44JV/ArcGIS/rest/services/US_MLRA/FeatureServer'
+url <- parse_url("https://services.arcgis.com/SXbDpmb7xQkk44JV/arcgis/rest/services")
+url$path <- paste(url$path, "US_MLRA/FeatureServer/0/query", sep = "/")
+url$query <- list(where = "1=1",
+                  outFields = "*",
+                  returnGeometry = "true",
+                  f = "geojson")
+request <- build_url(url)
+mlra <- st_read(request)
+
+#wfs_states <- 'https://services.arcgis.com/SXbDpmb7xQkk44JV/ArcGIS/rest/services/USA_States_Generalized/FeatureServer'
+url <- parse_url("https://services.arcgis.com/SXbDpmb7xQkk44JV/arcgis/rest/services")
+url$path <- paste(url$path, "USA_States_Generalized/FeatureServer/0/query", sep = "/")
+url$query <- list(where = "1=1",
+                  outFields = "*",
+                  returnGeometry = "true",
+                  f = "geojson")
+request <- build_url(url)
+states <- st_read(request)
+states <- st_crop(states, mlra)
+
+
+tmap_mode("view")
+  tm_shape(states) +
+    tm_borders() +
+    tm_lines(lwd = "strokelwd", legend.lwd.show = FALSE) +
+    tm_shape(LT_data_points) +
+    tm_dots(col="#1B9E77", size=0.3) +
+    
+    #tm_scale_bar(position = c(0.06, 0.05)) +
+    tm_add_legend('fill', 
+	col = c( "#1B9E77"),
+	border.col = "grey40",
+	size = 1,
+	labels = c('KSSL'),
+	title="Potential Sampling Areas") +
+    tm_layout(main.title = "Loamy Tableland ESD", bg.color = "white", legend.outside = TRUE) +
+    tm_view(set.view = c(-99.22, 39.13,  4))
+
+```
+
+```{r}
+library(raster)
+
+
+nlcd_change <- raster::raster('C:/R_Drive/Data_Files/NRCS/NLCD_ESD/NLCD_2001_2019_change_index_L48_20210604_9ZdibphhsrPTxdgZKOjp.tiff')
+Lt_nlcd_change <- raster::extract(nlcd_change, LT_data_points)
+
+nlcd01 <- raster::raster('C:/R_Drive/Data_Files/NRCS/NLCD_ESD/NLCD_2001_Land_Cover_L48_20210604_9ZdibphhsrPTxdgZKOjp.tiff')
+nlcd04 <- raster::raster('C:/R_Drive/Data_Files/NRCS/NLCD_ESD/NLCD_2004_Land_Cover_L48_20210604_9ZdibphhsrPTxdgZKOjp.tiff')
+nlcd06 <- raster::raster('C:/R_Drive/Data_Files/NRCS/NLCD_ESD/NLCD_2006_Land_Cover_L48_20210604_9ZdibphhsrPTxdgZKOjp.tiff')
+nlcd08 <- raster::raster('C:/R_Drive/Data_Files/NRCS/NLCD_ESD/NLCD_2008_Land_Cover_L48_20210604_9ZdibphhsrPTxdgZKOjp.tiff')
+nlcd11 <- raster::raster('C:/R_Drive/Data_Files/NRCS/NLCD_ESD/NLCD_2011_Land_Cover_L48_20210604_9ZdibphhsrPTxdgZKOjp.tiff')
+nlcd13 <- raster::raster('C:/R_Drive/Data_Files/NRCS/NLCD_ESD/NLCD_2013_Land_Cover_L48_20210604_9ZdibphhsrPTxdgZKOjp.tiff')
+nlcd16 <- raster::raster('C:/R_Drive/Data_Files/NRCS/NLCD_ESD/NLCD_2016_Land_Cover_L48_20210604_9ZdibphhsrPTxdgZKOjp.tiff')
+nlcd19 <- raster::raster('C:/R_Drive/Data_Files/NRCS/NLCD_ESD/NLCD_2019_Land_Cover_L48_20210604_9ZdibphhsrPTxdgZKOjp.tiff')
+Lt_nlcd_01 <- raster::extract(nlcd01, LT_data_points)
+Lt_nlcd_04 <- raster::extract(nlcd04, LT_data_points)
+Lt_nlcd_06 <- raster::extract(nlcd06, LT_data_points)
+Lt_nlcd_08 <- raster::extract(nlcd08, LT_data_points)
+Lt_nlcd_11 <- raster::extract(nlcd11, LT_data_points)
+Lt_nlcd_13 <- raster::extract(nlcd13, LT_data_points)
+Lt_nlcd_16 <- raster::extract(nlcd16, LT_data_points)
+Lt_nlcd_19 <- raster::extract(nlcd19, LT_data_points)
+
+Lt_nlcd.df <- data.frame(Lt_nlcd_change, Lt_nlcd_01, Lt_nlcd_04, Lt_nlcd_06, Lt_nlcd_08, Lt_nlcd_11, Lt_nlcd_13, Lt_nlcd_16, Lt_nlcd_19) |> purrr::set_names('nlcd_change', 'nlcd01', 'nlcd04', 'nlcd06', 'nlcd08', 'nlcd11', 'nlcd13', 'nlcd16', 'nlcd19', )
+Lt_nlcd.df <- Lt_nlcd.df |> dplyr::mutate(lc = dplyr::case_when(nlcd_change==1 & nlcd19==82 ~ 'Crops',
+                                                         nlcd_change==1 & nlcd19==81 ~ 'Pasture',
+                                                         nlcd_change==1 & nlcd19==71 ~ 'Grassland',
+                                                         nlcd_change==7 & nlcd06==52 ~ 'Shrub-Crop07',
+                                                         nlcd_change==7 & nlcd08==71 ~ 'Grassland-Crop09',
+                                                         nlcd_change==7 & nlcd06==71 & nlcd08==82 ~ 'Grassland-Crop07',
+                                                         TRUE ~ 'Fail'))
+
+LT_data_points_nlcd_data <- dplyr::bind_cols(LT_phy_chem_nasis, Lt_nlcd.df)
+
+LT_data_points_nlcd <- LT_data_points_nlcd_data |> dplyr::filter(!is.na(texture_lab), !hzn_bot < hzn_top, !hzn_bot == hzn_top)
+
+aqp::depths(LT_data_points_nlcd) <-  pedon_key ~ hzn_top  + hzn_bot 
+LT_data_points_nlcd.slab.r <- aqp::slab(LT_data_points_nlcd, fm = pedon_key ~ clay_total + silt_total + sand_total + bulk_density_third_bar + ph_h2o + organic_carbon_walkley_black + estimated_organic_carbon + aggregate_stability_05_2_mm, slab.structure=c(0,15), slab.fun=mean_na)
+LT_data_points_nlcd.slab.r.1 <- LT_data_points_nlcd.slab.r |> dplyr::select(-c(contributing_fraction)) |> tidyr::pivot_wider(names_from=variable, values_from=value)
+LT_data_points_nlcd.slab.r.1[ is.na(LT_data_points_nlcd.slab.r.1) ] <- NA
+LT_data_points_nlcd.slab.r.1 <- LT_data_points_nlcd.slab.r.1 |> dplyr::rowwise() |> dplyr::mutate(soc = if_else(!is.na(organic_carbon_walkley_black), organic_carbon_walkley_black, estimated_organic_carbon))|> dplyr::mutate(soc_cl = soc_class(soc), ph_cl = ph_class(ph_h2o), db_cl = db_class(bulk_density_third_bar), txt_class = gettt(sand_total, silt_total, clay_total))
+
+
+LT_data_points_complete <- LT_data_points_nlcd.slab.r.1 |> dplyr::filter(!is.na(soc_cl) & !is.na(db_cl) & !is.na(ph_cl) & !is.na(txt_class)) |> dplyr::select(pedon_key, top, bottom, soc_cl, ph_cl, db_cl, txt_class) |> dplyr::ungroup() |> dplyr::mutate(pedon_key = as.integer(pedon_key))
+
+LT_data_points_nlcd_data_sub <- LT_data_points_nlcd_data |> dplyr::select(pedon_key, SSL_name, lat, lon, earthcovkind1,obsdate,lc) |> dplyr::distinct()
+
+LT_data_points_complete <- LT_data_points_complete |> dplyr::left_join(LT_data_points_nlcd_data_sub, by="pedon_key")
+```
+
+#DSP4SH database
+```{r}
+library(DBI)
+library(RSQLite)
+library(dplyr, warn.conflicts = FALSE)
+library(readxl)
+library(readr)
+library(here)
+
+dsp4sh4 <- dbConnect(SQLite(), here("data/raw_data/dsp4sh4.db"))
+dbListTables(dsp4sh4) #To check tables
+
+pedon <- dbGetQuery(dsp4sh4, "SELECT * from pedon;")
+coop_lab <- dbGetQuery(dsp4sh4, "SELECT * from cooplabmst;")
+kssl_lab <- dbGetQuery(dsp4sh4, "SELECT * from kssllabmst;")
+layerdesc <- dbGetQuery(dsp4sh4, "SELECT * from layerdescription;")
+layerdesg <- dbGetQuery(dsp4sh4, "SELECT * from layerdesignation;")
+plot <- dbGetQuery(dsp4sh4, "SELECT * from plotoverview;")
+dspplotmgt <- dbGetQuery(dsp4sh4, "SELECT * from dspplotmgt;")
+
+lab <- coop_lab |> dplyr::select(-c(DSP_Pedon)) |> dplyr::left_join(kssl_lab, by=c('KSSL_labsampnum'='natural_key'))
+pedon_lab <- pedon |> dplyr::left_join(lab, by='DSP_Pedon_ID')
+pedon_lab <- pedon_lab |> dplyr::left_join(dspplotmgt |> dplyr::select(-c(Soil)), by='DSP_Plot_ID')
+pedon_lab <- pedon_lab |> dplyr::left_join(layerdesc |> dplyr::rename(field_clay_pct = Clay_pct), by=c('DSP_Pedon_ID'='DSP_Pedon_ID', 'DSP_sample_ID'='DSP_sample_ID'))
+pedon_lab <- pedon_lab |> dplyr::left_join(layerdesg, by=c('DSP_Pedon_ID'='DSP_Pedon_ID', 'DSP_sample_ID'='DSP_sample_ID'))
+pedon_lab <- pedon_lab |> dplyr::filter(Soil=="Keith")
+
+pedon_lab <- pedon_lab |> dplyr::select(c(pedon_ID,DSP_Pedon_ID,DSP_Plot_ID,DSP_sample_ID,LU,till,trt, pedon_x,pedon_y,Soil,Bulk_Density,Water_Content,SOC_pct,KSSL_WSA,Yoder_AggStab_MWD,Soil_Respiration,Bglucosidase,Bglucosaminidase,AlkalinePhosphatase,AcidPhosphatase,Phosphodiesterase,POX_C,ACE,KSSL_labsampnum,horizon_designation,lay_depth_to_top, lay_depth_to_bottom,clay_tot_psa,silt_tot_psa,sand_tot_psa,co3_cly,tex_psda,adod,caco3,ph_cacl2,ph_h2o,CKMnO4,PNitroBGlu,ag_stab,c_tot_ncs,n_tot_ncs,s_tot_ncs,estimated_organic_C,Field_Texture,Coarse_Frag_volume,field_clay_pct,Color_Moist_Hue,Color_Moist_Value,Color_Moist_Chroma))
+
+
+pedon_lab_points <- st_as_sf(pedon_lab, coords = c("pedon_x","pedon_y"), crs = 4326)
+
+dsp_nlcd_change <- raster::extract(nlcd_change, pedon_lab_points)
+dsp_nlcd_01 <- raster::extract(nlcd01, pedon_lab_points)
+dsp_nlcd_04 <- raster::extract(nlcd04, pedon_lab_points)
+dsp_nlcd_06 <- raster::extract(nlcd06, pedon_lab_points)
+dsp_nlcd_08 <- raster::extract(nlcd08, pedon_lab_points)
+dsp_nlcd_11 <- raster::extract(nlcd11, pedon_lab_points)
+dsp_nlcd_13 <- raster::extract(nlcd13, pedon_lab_points)
+dsp_nlcd_16 <- raster::extract(nlcd16, pedon_lab_points)
+dsp_nlcd_19 <- raster::extract(nlcd19, pedon_lab_points)
+
+dsp_nlcd.df <- data.frame(dsp_nlcd_change, dsp_nlcd_01, dsp_nlcd_04, dsp_nlcd_06, dsp_nlcd_08, dsp_nlcd_11, dsp_nlcd_13, dsp_nlcd_16, dsp_nlcd_19) |> purrr::set_names('nlcd_change', 'nlcd01', 'nlcd04', 'nlcd06', 'nlcd08', 'nlcd11', 'nlcd13', 'nlcd16', 'nlcd19', )
+dsp_nlcd.df <- dsp_nlcd.df |> dplyr::mutate(lc = dplyr::case_when(nlcd_change==1 & nlcd19==82 ~ 'Crops',
+                                                         nlcd_change==1 & nlcd19==81 ~ 'Pasture',
+                                                         nlcd_change==1 & nlcd19==71 ~ 'Grassland',
+                                                         nlcd_change==7 & nlcd06==52 ~ 'Shrub-Crop07',
+                                                         nlcd_change==7 & nlcd08==71 ~ 'Grassland-Crop09',
+                                                         nlcd_change==7 & nlcd06==71 & nlcd08==82 ~ 'Grassland-Crop07',
+                                                         TRUE ~ 'Fail'))
+
+dsp_data_points_nlcd_data <- dplyr::bind_cols(pedon_lab, dsp_nlcd.df)
+
+aqp::depths(dsp_data_points_nlcd_data) <-  pedon_ID ~ lay_depth_to_top  + lay_depth_to_bottom 
+dsp_data_points_nlcd.slab.r <- aqp::slab(dsp_data_points_nlcd_data, fm = pedon_ID ~ clay_tot_psa + silt_tot_psa + sand_tot_psa + Bulk_Density + ph_h2o + SOC_pct + KSSL_WSA, slab.structure=c(0,15), slab.fun=mean_na)
+dsp_data_points_nlcd.slab.r.1 <- dsp_data_points_nlcd.slab.r |> dplyr::select(-c(contributing_fraction)) |> tidyr::pivot_wider(names_from=variable, values_from=value)
+dsp_data_points_nlcd.slab.r.1[ is.na(dsp_data_points_nlcd.slab.r.1) ] <- NA
+dsp_data_points_nlcd.slab.r.1 <- dsp_data_points_nlcd.slab.r.1 |> dplyr::rowwise() |> dplyr::mutate(soc_cl = soc_class(SOC_pct), ph_cl = ph_class(ph_h2o), db_cl = db_class(Bulk_Density), txt_class = gettt(sand_tot_psa, silt_tot_psa, clay_tot_psa))
+dsp_data_points_nlcd.slab.r.1 <- dsp_data_points_nlcd.slab.r.1 |> dplyr::ungroup() |> dplyr::rename(pedon_key=pedon_ID)
+
+dsp_data_points_complete <- dsp_data_points_nlcd.slab.r.1 |> dplyr::filter(!is.na(soc_cl) & !is.na(db_cl) & !is.na(ph_cl) & !is.na(txt_class)) |> dplyr::select(pedon_key, top, bottom, soc_cl, ph_cl, db_cl, txt_class) |> dplyr::ungroup() |> dplyr::mutate(pedon_key = as.integer(pedon_key))
+
+dsp_data_points_nlcd <- dplyr::bind_cols(pedon_lab, dsp_nlcd.df)
+dsp_data_points_nlcd_data_sub <- dsp_data_points_nlcd |> dplyr::select(pedon_key=pedon_ID, SSL_name=Soil, lat=pedon_y, lon=pedon_x, earthcovkind1=trt,lc) |> dplyr::distinct()
+LT_data_points_nlcd_data_sub <- LT_data_points_nlcd_data |> dplyr::select(pedon_key, SSL_name, lat, lon, earthcovkind1,obsdate,lc) |> dplyr::distinct()
+dsp_data_points_complete <- dsp_data_points_complete |> dplyr::left_join(dsp_data_points_nlcd_data_sub, by="pedon_key")
+
+```
+
+# combine dataframes
+```{r}
+stm_data <- bind_rows(dsp_data_points_complete, LT_data_points_complete |> dplyr::select(-c(obsdate)))
+
+stm_data <- stm_data |> dplyr::mutate(soc_cl = factor(soc_cl, order=TRUE, levels=c('low', 'moderate', 'high', 'very high')), db_cl = factor(db_cl, order=TRUE, levels=c('very loose', 'loose', 'normal', 'hard', 'compact')), ph_cl = factor(ph_cl, order=TRUE, levels=c("Strongly acid", "Moderately acid", "Slightly acid", "Neutral", "Slightly alkaline", "Moderately alkaline")), txt_class = factor(txt_class, order=TRUE, levels=textures)) 
+
+stm_data <- stm_data |> dplyr::mutate(lc= if_else(lc=="Fail", "Grassland", lc))
+
+
+```
+
+```{r}
+
+library(bnclassify)
+stm_data_sub <- stm_data |> dplyr::filter(lc=="Crops" | lc=="Grassland") |> dplyr::select(lc, txt_class, db_cl, ph_cl, soc_cl) |> dplyr::mutate(lc=factor(lc)) |> as.data.frame()
+stm_data_sub <- stm_data |> dplyr::select(lc, txt_class, db_cl, ph_cl, soc_cl) |> dplyr::mutate(lc=factor(lc))
+
+stm_data_sub <- stm_data_sub |> dplyr::mutate(txt_class = factor(txt_class, order=F), ph_cl = factor(ph_cl, order=F), soc_cl = factor(soc_cl, order=F), db_cl = factor(db_cl, order=F)) |> as.data.frame()
+
+nb <- nb('lc', stm_data_sub) # Learn a naive Bayes structure
+nb <- lp(nb, stm_data_sub, smooth = 1) # Learn parameters
+
+cv(nb, stm_data_sub, k = 10) # 10-fold Cross-validation estimate of accuracy
+#> [1] 0.8576045
+head(predict(nb, stm_data_sub)) # Classify the entire data set
+#> [1] unacc unacc unacc unacc unacc unacc
+#> Levels: unacc acc good vgood
+#> 
+#> # Naive Bayes
+nb <- nb('lc', stm_data_sub)
+# ODE Chow-Liu with AIC score (penalized log-likelihood)
+ode_cl_aic <- tan_cl('lc', stm_data_sub, score = 'aic')
+# Semi-naive Bayes with forward sequential selection and joining (FSSJ) and
+# 5-fold cross-validation
+fssj <- fssj('lc', stm_data_sub, k = 5, epsilon = 0)
+
+plot(ode_cl_aic)
+
+
+nb <- lp(nb, stm_data_sub, smooth = 0.01)
+awnb <- lp(nb, stm_data_sub, smooth = 0.01, awnb_trees = 10, awnb_bootstrap = 0.5)
+manb <- lp(nb, stm_data_sub, smooth = 0.01, manb_prior = 0.5)
+ode_cl_aic <- bnc('tan_cl', 'lc', stm_data_sub, smooth = 1, dag_args = list(score = 'aic'))
+logLik(ode_cl_aic, stm_data_sub)
+AIC(ode_cl_aic, stm_data_sub)
+p <- predict(nb, stm_data_sub)
+accuracy(p, stm_data_sub$lc)
+
+set.seed(0)
+cv(ode_cl_aic, stm_data_sub, k = 10)
+cv(ode_cl_aic, stm_data_sub, k = 20, dag = FALSE, mean = FALSE)
+cmi('txt_class', 'soc_cl', stm_data_sub, 'lc')
+
+
+
+library(mlr)
+ode_cl_aic_mlr <- as_mlr(ode_cl_aic, dag = TRUE, id = "ode_cl_aic")
+
+# 5-fold cross-validation
+rdesc = makeResampleDesc("CV", iters = 2)
+# sequential floating forward search
+ctrl = makeFeatSelControlSequential(method = "sfs", alpha = 0)
+# Wrap ode_cl_aic_mlr with feature selection
+ode_cl_aic_mlr_fs = makeFeatSelWrapper(ode_cl_aic_mlr, resampling = rdesc,
+control = ctrl, show.info = FALSE)
+t <- makeClassifTask(id = "stm_data_sub", data = stm_data_sub,
+target = 'lc', fixup.data = "no", check.data = FALSE)
+
+suppressWarnings(RNGversion("3.5.0"))
+set.seed(0)
+# Select features
+mod <- train(ode_cl_aic_mlr_fs, task = t)
+sfeats <- getFeatSelResult(mod)
+sfeats
+
+```
+
+
+# Pixel /Index Value Description
+1 No Change
+2 Change from or to Water
+3 Change from or to any of the four Urban classes (open space; low, medium, and high intensity)
+4 Change from Herbaceous Wetland to Woody Wetland, or vice versa
+5 Change from or to Herbaceous Wetland
+6 Change from Cultivated Crops to Hay / Pasture, or vice versa
+7 Change from or to Cultivated Crops
+8 Change from or to Hay / Pasture
+9 Persistent Grassland and Shrubland change. This change index attempts to identify changes to persistent Grassland and Shrubland areas, and to separate them from transitional shrubland areas such as regenerating forests.
+10 Change from or to Barren
+11 Change from or to any of the three Forest classes (Evergreen, Deciduous, and Mixed)
+12 Change from or to Woody Wetland
+
+
+# National Land Cover Database Class Legend and Description
+Class\ Value Classification Description
+
+## Water
+11 Open Water- areas of open water, generally with less than 25% cover of vegetation
+or soil.
+
+12 Perennial Ice/Snow- areas characterized by a perennial cover of ice and/or snow,
+generally greater than 25% of total cover.
+
+## Developed
+21 Developed, Open Space- areas with a mixture of some constructed materials, but
+mostly vegetation in the form of lawn grasses. Impervious surfaces account for less
+than 20% of total cover. These areas most commonly include large-lot single-family
+housing units, parks, golf courses, and vegetation planted in developed settings for
+recreation, erosion control, or aesthetic purposes.
+
+22 Developed, Low Intensity- areas with a mixture of constructed materials and
+vegetation. Impervious surfaces account for 20% to 49% percent of total cover.
+These areas most commonly include single-family housing units.
+
+23 Developed, Medium Intensity -areas with a mixture of constructed materials and
+vegetation. Impervious surfaces account for 50% to 79% of the total cover. These
+areas most commonly include single-family housing units.
+
+24 Developed High Intensity-highly developed areas where people reside or work in
+high numbers. Examples include apartment complexes, row houses and
+commercial/industrial. Impervious surfaces account for 80% to 100% of the total
+cover.
+
+## Barren
+31 Barren Land (Rock/Sand/Clay) - areas of bedrock, desert pavement, scarps, talus,
+slides, volcanic material, glacial debris, sand dunes, strip mines, gravel pits and other
+accumulations of earthen material. Generally, vegetation accounts for less than 15%
+of total cover.
+
+## Forest
+41 Deciduous Forest- areas dominated by trees generally greater than 5 meters tall,
+and greater than 20% of total vegetation cover. More than 75% of the tree species
+shed foliage simultaneously in response to seasonal change.
+
+42 Evergreen Forest- areas dominated by trees generally greater than 5 meters tall,
+and greater than 20% of total vegetation cover. More than 75% of the tree species
+maintain their leaves all year. Canopy is never without green foliage.
+
+43 Mixed Forest- areas dominated by trees generally greater than 5 meters tall, and
+greater than 20% of total vegetation cover. Neither deciduous nor evergreen species
+are greater than 75% of total tree cover.
+
+## Shrubland
+51 Dwarf Scrub- Alaska only areas dominated by shrubs less than 20 centimeters tall
+with shrub canopy typically greater than 20% of total vegetation. This type is often
+co-associated with grasses, sedges, herbs, and non-vascular vegetation.
+
+52 Shrub/Scrub- areas dominated by shrubs; less than 5 meters tall with shrub canopy
+typically greater than 20% of total vegetation. This class includes true shrubs, young
+trees in an early successional stage or trees stunted from environmental conditions.
+
+## Herbaceous
+71 Grassland/Herbaceous- areas dominated by gramanoid or herbaceous vegetation,
+generally greater than 80% of total vegetation. These areas are not subject to
+intensive management such as tilling, but can be utilized for grazing.
+
+72 Sedge/Herbaceous- Alaska only areas dominated by sedges and forbs, generally
+greater than 80% of total vegetation. This type can occur with significant other
+grasses or other grass like plants, and includes sedge tundra, and sedge tussock
+tundra.
+
+73 Lichens- Alaska only areas dominated by fruticose or foliose lichens generally
+greater than 80% of total vegetation.
+
+74 Moss- Alaska only areas dominated by mosses, generally greater than 80% of total
+vegetation.
+
+## Planted/Cultivated
+81 Pasture/Hay-areas of grasses, legumes, or grass-legume mixtures planted for
+livestock grazing or the production of seed or hay crops, typically on a perennial
+cycle. Pasture/hay vegetation accounts for greater than 20% of total vegetation.
+
+82 Cultivated Crops -areas used for the production of annual crops, such as corn,
+soybeans, vegetables, tobacco, and cotton, and also perennial woody crops such as
+orchards and vineyards. Crop vegetation accounts for greater than 20% of total
+vegetation. This class also includes all land being actively tilled.
+
+## Wetlands
+90 Woody Wetlands- areas where forest or shrubland vegetation accounts for greater
+than 20% of vegetative cover and the soil or substrate is periodically saturated with
+or covered with water.
+
+
+# Denomination ph range
+Ultra acid < 3.5
+Extremely acid 3.5–4.4
+Very strongly acid 4.5–5.0
+Strongly acid 5.1–5.5
+Moderately acid 5.6–6.0
+Slightly acid 6.1–6.5
+Neutral 6.6–7.3
+Slightly alkaline 7.4–7.8
+Moderately alkaline 7.9–8.4
+Strongly alkaline 8.5–9.0
+Very strongly alkaline > 9.0
+
+
+
+# SOC classes (4 classes)
+<!-- 0-1 -->
+<!-- 1-2 -->
+<!-- 2-3 -->
+<!-- >3 -->
+
+
+
+# Db classes
+<!-- <1 = very loose -->
+<!-- 1-1.2 = loose -->
+<!-- 1.2-1.4 = normal -->
+<!-- 1.4-1.6 = hard -->
+<!-- >1.6 = compact -->
+
+
+
+```{r}
+textures <- c("Sand","Loamy sand","Sandy loam","Loam","Silt loam",
+                "Silt","Sandy clay loam","Clay loam","Silty clay loam",
+                "Sandy clay","Silty clay","Clay")
+
+ph_class <- function(ph){
+if(is.na(ph)){
+  class = NA
+}else if(ph <= 3.5){
+  class = 'Ultra acid'
+}else if(ph > 3.5 & ph <= 4.5){
+  class = 'Extremely acid'
+}else if(ph > 4.5 & ph <= 5){
+  class = 'Very strongly acid'
+}else if(ph > 5 & ph < 5.6){
+  class = 'Strongly acid'
+}else if(ph >= 5.6 & ph <= 6){
+  class = 'Moderately acid'
+}else if(ph > 6 & ph <= 6.5){
+  class = 'Slightly acid'
+}else if(ph > 6.5 & ph <= 7.3){
+  class = 'Neutral'
+}else if(ph > 7.3 & ph <= 7.8){
+  class = 'Slightly alkaline'
+}else if(ph > 7.8 & ph <= 8.4){
+  class = 'Moderately alkaline'
+}else if(ph > 8.4 & ph <= 9){
+  class = 'Strongly alkaline'
+}else if(ph > 9 & ph <= 9){
+  class = 'Very strongly alkaline'
+}else {class = NA}
+return(class)
+}
+
+soc_class <- function(soc){
+if(is.na(soc)){
+  class = NA
+}else if(soc <= 1){
+  class = 'low'
+}else if(soc > 1 & soc <= 2){
+  class = 'moderate'
+}else if(soc > 2 & soc <= 3){
+  class = 'high'
+}else if(soc > 3){
+  class = 'very high'
+}else {class = NA}
+return(class)
+}
+
+db_class <- function(Db){
+if(is.na(Db)){
+  class = NA
+}else if(Db <= 1){
+  class = 'very loose'
+}else if(Db > 1 & Db <= 1.2){
+  class = 'loose'
+}else if(Db > 1.2 & Db <= 1.4){
+  class = 'normal'
+}else if(Db > 1.4 & Db <= 1.6){
+  class = 'hard'
+}else if(Db > 1.6){
+  class = 'compact'
+}
+return(class)
+}
+
+gettt <- function(sand, silt, clay){
+  if(is.na(sand) | is.na(silt) | is.na(clay)){
+    x = NA
+  } else if((silt + 1.5 * clay) < 15){
+    x = "Sand"
+  } else if((silt + 1.5 * clay) >= 15 & (silt + 2.0 * clay) < 30){
+    x = "Loamy sand"
+  } else if((clay >= 7) & (clay <= 20) & (sand > 52) & ((silt + 2.0 * clay) >= 30)){
+    x = "Sandy loam"
+  } else if((clay < 7) & (silt < 50) & ((silt + 2.0 * clay) >= 30)){
+    x = "Sandy loam"
+  } else if((clay >= 7) & (clay <= 27) & (silt >= 28) & (silt < 50) & (sand <= 52)){
+    x = "Loam"
+  } else if(((silt >= 50) & (clay >= 12) & (clay < 27)) | ((silt >= 50) & (silt < 80) & (clay < 12))){
+    x = "Silt loam"
+  } else if((silt >= 80) & (clay < 12)){
+    x = "Silt"
+  } else if((clay >= 20) & (clay < 35) & (silt < 28) & (sand > 45)){
+    x = "Sandy clay loam"
+  } else if((clay >= 27) & (clay < 40) & (sand > 20) & (sand <= 45)){
+    x = "Clay loam"
+  } else if((clay >= 27) & (clay < 40) & (sand <= 20)){
+    x = "Silty clay loam"
+  } else if((clay >= 35) & (sand >= 45)){
+    x = "Sandy clay"
+  } else if((clay >= 40) & (silt >= 40)){
+    x = "Silty clay"
+  } else if((clay >= 40) & (sand <= 45) & (silt < 40)){
+    x = "Clay"
+  }
+  return(x)
+}
+
+```
+

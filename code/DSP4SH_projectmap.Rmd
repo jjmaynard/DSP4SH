@@ -1,0 +1,101 @@
+---
+title: "DSP4SH Project Map"
+author: "E. Adeleke"
+date: "2023-04-21"
+output: html_document
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(collapse = T, comment = "#>")
+options(tibble.print_min = 4L, tibble.print_max = 4L)
+```
+
+Load `{DBI}` package to use DSP4SH SQLite DB through R and other relevant packages
+```{r setup, message=FALSE}
+library(DBI)
+library(RSQLite)
+library(dplyr, warn.conflicts = FALSE)
+library(leaflet)
+library(mapview)
+library(webshot)
+library(htmlwidgets)
+```
+Install phantomjs if not already in your library to capture screenshot of the map and save it as a PNG file
+```{r}
+webshot::install_phantomjs() #to save map as a PNG file
+```
+Connect to the SQLite database
+```{r}
+dsp4sh4 <- dbConnect(SQLite(), "C:/workspace2/DSP4SH/SQLite_DB/dsp4sh4.db")
+#check the list of tables in the db
+dbListTables(dsp4sh4) 
+#Query the sourceproject in the db
+dbGetQuery(dsp4sh4,
+           "SELECT *
+           FROM sourceproject 
+           LIMIT 10;")
+#query and select the coordinates of the project from the dataframe 
+df <- dbGetQuery(dsp4sh4,
+           "SELECT institution,city,project_y,project_x,Status
+           FROM sourceproject;")
+df <- df %>% 
+  rename(lat = project_y, lon = project_x)
+
+```
+
+create a leaflet map
+```{r}
+m <- leaflet() %>% 
+  addProviderTiles("Esri.WorldTopoMap") %>% 
+  setView(lng = -95.7129, lat = 37.0902, zoom = 4) 
+m <- m %>% 
+  addMarkers(data = df, lat = ~lat, lng = ~lon, popup = ~Status, label = ~institution)
+m
+```
+
+save the map as html
+```{r}
+saveWidget(m, file = "DSP4SH_projectmap.html")
+```
+
+To generate a non-interactive map that shows the status of the project
+```{r}
+library(sf)
+library(ggplot2)
+#to return state polygons using {rnaturalearth}
+if(!require('rnaturnalearth')){
+  install.packages("rnaturalearth")
+}
+library(rnaturalearth) 
+#generate a map
+map <- ne_states(country = "United States of America", returnclass = "sf")
+## Plotting the map
+DSP4SH_projectmap <- 
+ggplot(data = map %>% filter(iso_3166_2 !="US-AK")) +
+  geom_sf(fill = "#FAFAF3") +
+  geom_point(data = df, 
+             aes(x = lon, y = lat, colour = Status), 
+             alpha = 0.6, show.legend = TRUE) +
+  guides(col=guide_legend(ncol=2)) +
+  theme(panel.background = element_rect(fill = "#E5F0FF", colour = "#E5F0FF"),
+        #panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        # surpress legend
+        legend.position = "bottom",
+        axis.line = element_blank(),
+        axis.ticks=element_blank(),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        legend.key.size = unit(0.05, 'cm'),
+        legend.title=element_text(size=10), 
+        legend.text=element_text(size=8)) 
+DSP4SH_projectmap
+```
+save as a TIFF file
+```{r}
+ggsave("../DSP4SH_projectmap.tiff", height = 5, width = 9)
+```
+disconnect from db
+```{r}
+dbDisconnect(dsp4sh4)
+```
