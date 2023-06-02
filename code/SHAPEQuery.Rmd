@@ -1,0 +1,37 @@
+---
+title: "SHAPE Query"
+author: "E. Adeleke"
+date: "2023-04-25"
+output: html_document
+---
+This RMD is to  query tables for SHAPE curve from the DSP4SH database 
+```{r}
+#library
+library(DBI)
+library(RSQLite)
+library(dplyr, warn.conflicts = FALSE)
+```
+
+```{r}
+#connect to the SQLite database
+dsp4sh4 <- dbConnect(SQLite(), "dsp4sh4.db")
+dbListTables(dsp4sh4) #To check tables
+```
+
+```{r}
+#To query top 3 layer data from `cooplabmst`, layerdescription,layerdesignation, and dspplotmgt tables in the dsp4sh database 
+s1 <- dbGetQuery(dsp4sh4,
+           "SELECT c.DSP_sample_ID,c.DSP_Pedon_ID,c.layer_no, SOC_pct,ACE,Soil_Respiration,POX_C,KSSL_WSA,Yoder_AggStab_MWD,Yoder_AggStab_TotalWS,Yoder_WS_2_8,Yoder_WS_pt5_2,Yoder_WS_250_500,Yoder_WS_53_250,hzdesg,hrzdep_t,hrzdep_b,Field_Texture,pedon_x,pedon_y,d.Soil Soil,Label
+           FROM cooplabmst c
+           JOIN layerdesignation lg ON c.DSP_sample_ID = lg.DSP_sample_ID
+           JOIN layerdescription ld ON c.DSP_sample_ID=ld.DSP_sample_ID
+           JOIN pedon p ON c.DSP_Pedon_ID = p.DSP_Pedon_ID
+           JOIN dspplotmgt d ON p.DSP_Plot_ID = d.DSP_Plot_ID 
+           WHERE c.layer_no <= 3;")
+s1
+```
+disconnect db connection
+```{r}
+dbDisconnect(dsp4sh4)
+```
+
