@@ -14,7 +14,7 @@ library(tmap)
 ```
 
 ```{r}
-#test
+
 # mean function
 mean_na <- function(x){
   x_mean <- mean(x, na.rm=TRUE)
